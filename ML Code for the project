@@ -1,0 +1,153 @@
+from google.colab import files
+import io
+import pandas as pd
+import numpy as np
+from sklearn.model_selecƟon import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import math
+import matplotlib.pyplot as plt
+
+# ---- STEP 0: Upload dataset ----
+print("Please upload your 'cleaned_sdu_dataset.csv' file...")
+uploaded = files.upload()
+
+file_name = list(uploaded.keys())[0]
+df = pd.read_csv(io.BytesIO(uploaded[file_name]))
+print(f"\nFile '{file_name}' uploaded successfully!")
+print(f"Rows: {len(df)} | Columns: {list(df.columns)}")
+
+# STEP 1: Encode categorical columns
+le_appliance = LabelEncoder()
+le_season = LabelEncoder()
+df['appliance_encoded'] = le_appliance.fit_transform(df['appliance_type'])
+df['season_encoded'] = le_season.fit_transform(df['season'])
+
+# STEP 2: Feature & target split
+X = df[['appliance_encoded','outdoor_temp','season_encoded',
+'household_size','Ɵme_hour','desired_temp','solar_generaƟon']]
+y = df['energy_kwh']
+
+X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.2,random_state=42)
+
+# STEP 3: Train Random Forest
+rf = RandomForestRegressor(n_esƟmators=200,random_state=42)
+rf.fit(X_train,y_train)
+
+y_pred = rf.predict(X_test)
+print("\nModel trained successfully")
+print(f"R2: {r2_score(y_test,y_pred):.3f} | MAE: {mean_absolute_error(y_test,y_pred):.4f} | "
+f"RMSE: {math.sqrt(mean_squared_error(y_test,y_pred)):.4f}")
+
+# STEP 4: Get user input
+print("\nEnter current environmental condiƟons for SDU:")
+
+out_temp = float(input("Outdoor Temperature (°C): "))
+desired_temp = float(input("Desired Indoor Temperature (°C): "))
+Ɵme_hour = int(input("Current Hour (0–23): "))
+solar_gen = float(input("Available Solar Power (W): "))
+season_in = input("Season (e.g., Summer/Winter): ")
+house_size = int(input("Household Size: "))
+
+# Prepare input data
+new_data = pd.DataFrame({
+'appliance_type':['Air CondiƟoning','Fan','Lights'],
+'appliance_encoded':le_appliance.transform(['Air CondiƟoning','Fan','Lights']),
+'outdoor_temp':[out_temp]*3,
+'season_encoded':le_season.transform([season_in]*3),
+'household_size':[house_size]*3,
+'Ɵme_hour':[Ɵme_hour]*3,
+'desired_temp':[desired_temp]*3,
+
+'solar_generaƟon':[solar_gen]*3
+})
+
+# STEP 5: Predict energy demand (kWh)
+pred_energy = rf.predict(new_data[['appliance_encoded','outdoor_temp','season_encoded',
+'household_size','Ɵme_hour','desired_temp','solar_generaƟon']])
+new_data['Predicted_Energy_kWh'] = pred_energy
+
+# STEP 6: Convert to power, scale & cap
+
+MAX_POWER = {'Air CondiƟoning':1500,'Fan':80,'Lights':10} # rated caps
+HOURS_PER_RECORD = 1.0 # 1 h interval
+
+# Per-device scaling divisors
+SCALE_DIVISOR = {'Air CondiƟoning':3.0,'Fan':1.0,'Lights':100.0}
+
+scaled_power = []
+for _,row in new_data.iterrows():
+dev = row['appliance_type']
+rawW = (row['Predicted_Energy_kWh']*1000.0/HOURS_PER_RECORD)/SCALE_DIVISOR[dev]
+maxW = MAX_POWER.get(dev,rawW)
+if rawW>maxW:
+print(f"Warning: Capped {dev}: {rawW:.1f} W → {maxW} W")
+scaled_power.append(min(rawW,maxW))
+new_data['Predicted_Power_W'] = scaled_power
+
+# STEP 7: Dynamic power allocaƟon
+available_solar_power = solar_gen
+total_demand = new_data['Predicted_Power_W'].sum()
+
+if total_demand <= available_solar_power:
+
+new_data['Allocated_Power_W'] = new_data['Predicted_Power_W']
+baƩery_storage = available_solar_power - total_demand
+decision = "Supply exceeds demand – baƩery charging"
+else:
+frac = available_solar_power/total_demand if total_demand>0 else 0
+new_data['Allocated_Power_W'] = new_data['Predicted_Power_W']*frac
+baƩery_storage = 0
+decision = "Supply shortage – proporƟonal distribuƟon applied"
+
+new_data['AllocaƟon_%'] = (new_data['Allocated_Power_W']/max(available_solar_power,1e-
+6))*100
+
+# STEP 8: Output & visualizaƟon
+
+print("\nSMART DISTRIBUTION RESULTS (Based on ML PredicƟons):")
+print(new_data[['appliance_type','Predicted_Power_W','Allocated_Power_W','AllocaƟon_%']])
+print(f"\nPower stored in BaƩery: {baƩery_storage:.2f} W")
+print(f"SDU Decision: {decision}")
+
+# Pie chart
+labels = new_data['appliance_type'].tolist()+['BaƩery']
+sizes = new_data['Allocated_Power_W'].tolist()+[baƩery_storage]
+plt.figure(figsize=(6,6))
+plt.pie(sizes,labels=labels,autopct='%1.1f%%',startangle=90)
+plt.Ɵtle("Power AllocaƟon (SDU)")
+plt.show()
+
+tradiƟonal_total = 1590
+
+# Smart SDU: opƟmized allocaƟon only (some devices throƩled or off)
+smart_load_total = new_data['Allocated_Power_W'].sum()
+
+# BaƩery: whatever solar remains aŌer meeƟng opƟmized demand
+baƩery_storage_total = baƩery_storage
+
+# Power saved is the difference in consumpƟon
+power_saved = tradiƟonal_total - smart_load_total
+
+print(f"\nTradiƟonal total consumpƟon (grid): {tradiƟonal_total:.2f} W")
+print(f"Smart SDU actual load consumpƟon: {smart_load_total:.2f} W")
+print(f"BaƩery storage (saved solar): {baƩery_storage_total:.2f} W")
+print(f"Net power saved through SDU opƟmizaƟon: {power_saved:.2f} W")
+
+# Bar chart: TradiƟonal vs SDU
+labels = ['TradiƟonal DistribuƟon', 'Smart DistribuƟon Unit']
+values = [tradiƟonal_total, smart_load_total]
+colors = ['red', 'green']
+
+plt.figure(figsize=(7,5))
+plt.bar(labels, values, color=colors)
+plt.ylabel("Power ConsumpƟon (W)")
+plt.Ɵtle("Comparison: TradiƟonal vs Smart DistribuƟon (OpƟmized SDU)")
+plt.grid(axis='y', linestyle='--', alpha=0.6)
+
+# Add value annotaƟons above bars
+plt.text(0, tradiƟonal_total + 30, f"{tradiƟonal_total:.1f} W", ha='center', fontsize=10)
+plt.text(1, smart_load_total + 30, f"{smart_load_total:.1f} W", ha='center', fontsize=10)
+
+plt.show()
